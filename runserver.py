@@ -1,49 +1,56 @@
-import socket
-import socketserver
+from twisted.internet import protocol, reactor
+from twisted.python import failure
+from twisted.internet.protocol import ServerFactory, connectionDone
+from twisted.internet.endpoints import TCP4ServerEndpoint
 import configparser
-import asyncio
+import json
 import os
 
+# Путь до конфигурационного файла сервера.
+# Должен находиться в переменной среды PATH_SERVER_CONFIG.
+PATH_SERVER_CONFIG = os.environ.get("PATH_SERVER_CONFIG")
+
+# Чтение конфигурационного файла.
+SERVER_CONFIG = configparser.ConfigParser()
+SERVER_CONFIG.read(PATH_SERVER_CONFIG, "UTF-8")
 
 
-class SocketService:
-    def __init__(self):
-        # Путь до конфигурационного файла сервера.
-        # Должен находиться в переменной среды PATH_SERVER_CONFIG.
-        self._PATH_SERVER_CONFIG = os.environ.get("PATH_SERVER_CONFIG")
+class GameService(protocol.Protocol):
+    def __init__(self, list_client, id_client):
+        self.id_client = id_client
+        self.list_client = list_client
 
-        # Чтение конфигурационного файла.
-        self._SERVER_CONFIG = configparser.ConfigParser()
-        self._SERVER_CONFIG.read(self._PATH_SERVER_CONFIG, "UTF-8")
+    def connectionMade(self):
+        self.list_client[self.id_client] = self
+        print("Connection: " + str(self.id_client))
 
-        # Инициализация серверного сокета.
-        # Адрес и порт берется из конфигурационного файла.
-        self._SERVER_SOCKET = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._SERVER_SOCKET.bind((self._SERVER_CONFIG.get("SERVER", "ADDRESS"),
-                                  self._SERVER_CONFIG.getint("SERVER", "PORT")))
-        self._SERVER_SOCKET.listen(5)
-        self._SERVER_SOCKET.setblocking(False)
+    def connectionLost(self, reason: failure.Failure = connectionDone):
+        del self.list_client[self.id_client]
 
-        self._LOOP = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._LOOP)
-        self._LOOP.run_until_complete(self.waiting_accept())
-
-    async def handle_connection(self, socket_c, address_c):
-        request = (await self._LOOP.sock_recv(socket_c, 1024)).decode("utf-8")
+    def dataReceived(self, data: bytes):
         try:
-            while request != 'quit':
-                request = (await self._LOOP.sock_recv(socket_c, 255)).decode('utf8')
-                if not request:
-                    break
-                print(request)
-        except:
-            self._SERVER_SOCKET.close()
+            data = json.loads(data.decode("utf-8"))
+        except UnicodeDecodeError:
+            self.sendMessage(b"Cannot decode, use utf-8")
+            return
+        except json.JSONDecodeError:
+            self.sendMessage(b"Cannot decode, use json")
+            return
 
-    async def waiting_accept(self):
-        while True:
-            socket_c, address_c = await self._LOOP.sock_accept(self._SERVER_SOCKET)
-            self._LOOP.create_task(self.handle_connection(socket_c, address_c))
+        self.sendMessage(b"Hello")
+    def sendMessage(self,  data: bytes):
+        self.transport.write(data)
 
+class SrvFactory(ServerFactory):
+    def __init__(self):
+        self.list_client = dict()
+        self.id_client = 0
+
+    def buildProtocol(self, addr):
+        self.id_client += 1
+        return GameService(self.list_client, self.id_client)
 
 if __name__ == '__main__':
-    socket_server = SocketService()
+    endpoint = TCP4ServerEndpoint(reactor, SERVER_CONFIG.getint("SERVER", "PORT"))
+    endpoint.listen(SrvFactory())
+    reactor.run()
